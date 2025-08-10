@@ -74,6 +74,37 @@ impl Backend {
                 self.reconnect();
                 true // 継続
             }
+            Event::RefreshAvailablePorts => {
+                match serialport::available_ports() {
+                    Ok(ports) => {
+                        let port_names = ports.into_iter().map(|p| p.port_name).collect();
+                        self.shared_data.port_info.write().available_ports = port_names;
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to get available ports: {e}");
+                        *self.shared_data.error_log.lock() =
+                            format!("Failed to get available ports: {e}");
+                    }
+                }
+                true // 継続
+            }
+            Event::ChangeMaxDataPoints(max_data_points) => {
+                self.shared_data.read_data.write().change_max_data_points(max_data_points);
+                true // 継続
+            }
+            Event::SendText(text) => {
+                if let Some(port) = self.port.as_mut() {
+                    if let Err(e) = port.write_all(text.as_bytes()) {
+                        eprintln!("Failed to send text: {e}");
+                        *self.shared_data.error_log.lock() = format!("Failed to send text: {e}");
+                    }
+                } else {
+                    eprintln!("No port selected to send text");
+                    *self.shared_data.error_log.lock() =
+                        "No port selected to send text".to_string();
+                }
+                true // 継続
+            }
             Event::ClearLog => {
                 self.shared_data.read_data.write().clear();
                 true // 継続
@@ -85,13 +116,11 @@ impl Backend {
         }
     }
 
-    pub fn start_reading_thread(mut self) -> JoinHandle<Self> {
+    pub fn start_backend_thread(mut self) -> JoinHandle<Self> {
         thread::spawn(move || {
             if let Some(port) = self.port.as_mut() {
                 port.set_timeout(Duration::from_millis(10)).unwrap();
             }
-
-            let mut last_port_check = Instant::now();
 
             loop {
                 let mut should_continue = true;
@@ -128,21 +157,6 @@ impl Backend {
                             self.shared_data.port_info.write().selected_port = None;
                         }
                     }
-                }
-
-                // 3. 定期的にポートリストを更新
-                if last_port_check.elapsed() >= Duration::from_secs(1) {
-                    match serialport::available_ports() {
-                        Ok(ports) => {
-                            let port_names = ports.into_iter().map(|p| p.port_name).collect();
-                            self.shared_data.port_info.write().available_ports = port_names;
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to get available ports: {e}");
-                            *self.shared_data.error_log.lock() = format!("Failed to get available ports: {e}");
-                        }
-                    }
-                    last_port_check = Instant::now();
                 }
 
                 thread::sleep(Duration::from_millis(1));
@@ -253,6 +267,7 @@ mod tests {
             read_data: Arc::new(RwLock::new(SerialRead::new(100))),
             port_info: Arc::new(RwLock::new(PortsInfo {
                 available_ports: vec![],
+                available_baud_rates: vec![],
                 selected_port: None,
                 baud_rate: 115200,
             })),
@@ -265,7 +280,7 @@ mod tests {
     #[test]
     fn test_shutdown_event() {
         let (backend, _, tx) = setup_test_backend();
-        let handle = backend.start_reading_thread();
+        let handle = backend.start_backend_thread();
         tx.send(Event::Shutdown).unwrap();
         let backend_returned = handle.join().unwrap();
         assert!(backend_returned.port.is_none());
@@ -286,7 +301,7 @@ mod tests {
             assert_eq!(read_data.graph_data.len(), 3);
         }
 
-        let handle = backend.start_reading_thread();
+        let handle = backend.start_backend_thread();
         tx.send(Event::ClearLog).unwrap();
         thread::sleep(Duration::from_millis(50));
 

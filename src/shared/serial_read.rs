@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 
 /// フロントエンドとバックエンドで共有されるデータ全体。
 /// この構造体が Arc<RwLock<...>> でラップされる。
+#[derive(Clone, Debug)]
 pub struct SerialRead {
     /// シリアルモニタ用の生データ。リングバッファとして機能する。
     /// index 0: 現在受信中の行（書き込み可能）
@@ -38,6 +39,16 @@ impl SerialRead {
             timestamps: VecDeque::with_capacity(max_data_points),
             line_counter: 0,
             max_data_points,
+        }
+    }
+
+    pub fn change_max_data_points(&mut self, new_max: usize) {
+        self.max_data_points = new_max;
+        // raw_dataとgraph_dataのサイズを調整
+        self.raw_data.truncate(new_max);
+        self.timestamps.truncate(new_max);
+        for series in &mut self.graph_data {
+            series.truncate(new_max);
         }
     }
 }
